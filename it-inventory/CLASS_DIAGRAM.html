@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IT Inventory — Class Diagram</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;700;800&display=swap');
+
+    body {
+      background: #0d0d0f;
+      color: #e2e0d8;
+      font-family: 'Syne', sans-serif;
+      min-height: 100vh;
+      padding: 32px 24px 64px;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 36px;
+      border-bottom: 1px solid #2a2a30;
+      padding-bottom: 20px;
+    }
+
+    header h1 {
+      font-size: 1.6rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      color: #fff;
+    }
+
+    header span {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: #534AB7;
+      background: #1a1830;
+      border: 1px solid #534AB7;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .fixes-panel {
+      background: #111118;
+      border: 1px solid #2a2a30;
+      border-left: 3px solid #534AB7;
+      border-radius: 8px;
+      padding: 20px 24px;
+      margin-bottom: 32px;
+      max-width: 900px;
+    }
+
+    .fixes-panel h2 {
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #534AB7;
+      margin-bottom: 14px;
+    }
+
+    .fix-item {
+      display: flex;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid #1e1e26;
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+
+    .fix-item:last-child { border-bottom: none; }
+
+    .fix-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+      align-self: flex-start;
+      margin-top: 2px;
+    }
+
+    .fix-tag.bug    { background: #3d1515; color: #f87171; border: 1px solid #7f1d1d; }
+    .fix-tag.design { background: #1a1830; color: #a78bfa; border: 1px solid #534AB7; }
+
+    .fix-text { color: #b0ae a6; }
+    .fix-text code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8em;
+      background: #1e1e28;
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: #c4b5fd;
+    }
+
+    #diagram-wrap {
+      background: #111118;
+      border: 1px solid #2a2a30;
+      border-radius: 12px;
+      padding: 32px;
+      overflow-x: auto;
+    }
+
+    #diagram-wrap svg {
+      max-width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>IT Inventory — Database Class Diagram</h1>
+  <span>FIXED &amp; FINAL</span>
+</header>
+
+<div class="fixes-panel">
+  <h2>🔧 Bugs Fixed</h2>
+
+  <div class="fix-item">
+    <span class="fix-tag bug">BUG</span>
+    <span class="fix-text"><strong>Model → DeviceModel rename.</strong> The <code>Model</code> class name clashes directly with Laravel's <code>Illuminate\Database\Eloquent\Model</code> base class. Renamed the Eloquent class to <code>DeviceModel</code> and the DB table to <code>device_models</code>. The FK column is now <code>device_model_id</code> everywhere.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag bug">BUG</span>
+    <span class="fix-text"><strong>Double JSON encoding in DeviceLogService.</strong> <code>DeviceLog</code> already has <code>'details' => 'array'</code> in <code>$casts</code>. Calling <code>json_encode()</code> manually before saving produced double-encoded JSON strings. Fixed by passing a plain PHP <code>array</code> directly to <code>DeviceLog::create()</code>.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag bug">BUG</span>
+    <span class="fix-text"><strong>Stray <code>}</code> in DeviceOwnerSwapController.</strong> An extra closing brace at the end of the file caused a PHP parse error and prevented the entire app from booting. Removed.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag bug">BUG</span>
+    <span class="fix-text"><strong>DeviceMovement model <code>$fillable</code> mismatch.</strong> <code>from_department_id</code> and <code>to_department_id</code> were listed in <code>$fillable</code> but those columns don't exist in the migration. Removed from <code>$fillable</code>; they would have caused silent insert failures.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag bug">BUG</span>
+    <span class="fix-text"><strong>DeviceLog migration column type.</strong> The <code>details</code> column was declared as <code>text()</code> but the model casts it as <code>array</code> (JSON). Changed to <code>json()</code> for proper DB-level type alignment.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag design">DESIGN</span>
+    <span class="fix-text"><strong>Removed redundant <code>site_id</code> from <code>devices</code> table.</strong> Site is already reachable via <code>device → location → site</code>. Keeping a second <code>site_id</code> on devices creates a risk of data inconsistency.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag design">DESIGN</span>
+    <span class="fix-text"><strong>Simplified StatusLabel.</strong> The separate <code>StatusLabel</code> enum table added no benefit over a <code>name</code> string column directly on <code>statuses</code>. Merged into one <code>statuses</code> table with a unique <code>name</code> field.</span>
+  </div>
+
+  <div class="fix-item">
+    <span class="fix-tag design">DESIGN</span>
+    <span class="fix-text"><strong>Added <code>department_id</code> to <code>devices</code> table.</strong> The class diagram and controllers referenced it but it was missing from the original devices migration.</span>
+  </div>
+</div>
+
+<div id="diagram-wrap">
+  <div id="erd"></div>
+</div>
+
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"JetBrains Mono", monospace',
+  themeVariables: {
+    darkMode: true,
+    fontSize: '11px',
+    fontFamily: '"JetBrains Mono", monospace',
+    lineColor: '#534AB7',
+    textColor: '#c2c0b6',
+    classText: '#e2e0d8',
+    primaryColor: '#1a1830',
+    primaryBorderColor: '#534AB7',
+    primaryTextColor: '#e2e0d8',
+    secondaryColor: '#111820',
+    secondaryBorderColor: '#185FA5',
+    tertiaryColor: '#101a14',
+    tertiaryBorderColor: '#3B6D11',
+  },
+});
+
+const diagram = `classDiagram
+
+  class Status {
+    +int id
+    +string name
+    +bool is_assignable
+  }
+
+  class Manufacturer {
+    +int id
+    +string name
+  }
+
+  class DeviceType {
+    +int id
+    +string name
+    +string category
+  }
+
+  class DeviceModel {
+    +int id
+    +int manufacturer_id
+    +int device_type_id
+    +string name
+  }
+
+  class Site {
+    +int id
+    +string name
+    +string address
+  }
+
+  class Location {
+    +int id
+    +int site_id
+    +string name
+  }
+
+  class Department {
+    +int id
+    +string name
+  }
+
+  class User {
+    +int id
+    +int department_id
+    +string name
+    +string email
+  }
+
+  class Device {
+    +int id
+    +int device_model_id
+    +int device_type_id
+    +int status_id
+    +int location_id
+    +int department_id
+    +int user_id
+    +string label
+    +string serial_number
+    +string comment
+  }
+
+  class DeviceAssignment {
+    +int id
+    +int device_id
+    +int user_id
+    +timestamp start_date
+    +timestamp end_date
+  }
+
+  class DeviceMovement {
+    +int id
+    +int device_id
+    +int from_location_id
+    +int to_location_id
+    +timestamp moved_at
+  }
+
+  class DeviceSwap {
+    +int id
+    +int device_a_id
+    +int device_b_id
+    +int location_a_id
+    +int location_b_id
+    +timestamp swapped_at
+  }
+
+  class DeviceOwnerSwap {
+    +int id
+    +int device_a_id
+    +int device_b_id
+    +int user_a_id
+    +int user_b_id
+    +timestamp swapped_at
+  }
+
+  class DeviceLog {
+    +int id
+    +int device_id
+    +string action
+    +json details
+    +timestamp logged_at
+  }
+
+  Manufacturer "1" --> "*" DeviceModel : produces
+  DeviceType "1" --> "*" DeviceModel : categorizes
+  DeviceModel "1" --> "*" Device : identifies
+  DeviceType "1" --> "*" Device : types
+  Status "1" --> "*" Device : has status
+  Site "1" --> "*" Location : contains
+  Location "1" --> "*" Device : positions
+  Department "1" --> "*" Device : assigned to
+  Department "1" --> "*" User : groups
+  User "1" --> "*" Device : currently holds
+  Device "1" --> "*" DeviceAssignment : tracked via
+  User "1" --> "*" DeviceAssignment : history
+  Device "1" --> "*" DeviceMovement : logged in
+  Device "1" --> "*" DeviceLog : audited in
+  Device "1" --> "*" DeviceSwap : swapped in
+  Device "1" --> "*" DeviceOwnerSwap : owner swapped in
+`;
+
+const { svg } = await mermaid.render('erd-svg', diagram);
+document.getElementById('erd').innerHTML = svg;
+</script>
+</body>
+</html>

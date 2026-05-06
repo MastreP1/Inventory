@@ -571,13 +571,19 @@ function StatCard({ label, value, color, sub, onClick }: {
 
 function TR({ children, onClick, active, selected }: { children:React.ReactNode; onClick?():void; active?:boolean; selected?:boolean }) {
   const { C } = useApp();
+  const [hovered, setHovered] = useState(false);
+  const bg = selected ? C.blue+'18' : active ? C.surface2 : hovered && onClick ? C.border2 : 'transparent';
   return (
-    <tr onClick={onClick} style={{
-      borderBottom:`1px solid ${C.border}`, cursor:onClick?'pointer':undefined,
-      background: selected ? C.blue+'18' : active ? C.surface2 : undefined,
-    }}
-      onMouseEnter={e=>{ if(!active&&!selected)(e.currentTarget as HTMLElement).style.background='#0f1929'; }}
-      onMouseLeave={e=>{ if(!active&&!selected)(e.currentTarget as HTMLElement).style.background='transparent'; }}>
+    <tr onClick={onClick}
+      onMouseEnter={()=>setHovered(true)}
+      onMouseLeave={()=>setHovered(false)}
+      style={{
+        borderBottom:`1px solid ${C.border}`,
+        cursor:onClick?'pointer':undefined,
+        background:bg,
+        transition:'background 0.12s ease',
+        boxShadow: hovered && onClick ? `inset 0 0 0 1px ${C.blue}30` : 'none',
+      }}>
       {children}
     </tr>
   );
@@ -948,10 +954,13 @@ function Dashboard({ navigate }: { navigate(page:string):void }) {
   }));
 
   const ACTION_COLOR: Record<string,string> = {
-    assigned:C.blue, unassigned:C.muted, moved:C.amber, location_swapped:C.purple,
-    owner_swapped:'#ec4899', drive_assigned:C.cyan, drive_unassigned:C.muted,
+    device_created:C.green, device_deleted:C.danger,
+    status_changed:C.amber, auto_stock_relocation:C.amber,
+    assigned:C.blue, unassigned:C.muted, moved:C.amber,
+    location_swapped:C.purple, owner_swapped:'#ec4899',
+    drive_assigned:C.cyan, drive_unassigned:C.muted,
     drive_swapped:C.cyan, cartridge_assigned:C.green, cartridge_unassigned:C.muted,
-    cartridge_swapped:C.green, status_changed:C.amber,
+    cartridge_swapped:C.green,
   };
 
   return (
@@ -1137,11 +1146,20 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
     });
   };
 
+  // Determine effective category for the form.
+  // Priority: (1) type chosen by user, (2) addins tab, (3) page's own category
+  const effectiveCatFromTab = isAddins ? (addinsTab==='cartridge'?'cartridge':'hard_drive') : null;
   const currentCategory = (lookups.types||[]).find((ty:any)=>String(ty.id)===form.device_type_id)?.category
-    || (isAddins&&addinsTab==='cartridge'?'cartridge':'hard_drive') || pageCfg?.category || 'computer';
+    || effectiveCatFromTab
+    || pageCfg?.category
+    || 'computer';
 
-  // Status options based on category
-  const statusOptions = currentCategory==='hard_drive'?lookups.driveStatuses||[]:currentCategory==='cartridge'?lookups.cartridgeStatuses||[]:lookups.statuses||[];
+  // Status options and FK name — derived purely from currentCategory
+  const statusOptions = currentCategory==='hard_drive'
+    ? lookups.driveStatuses||[]
+    : currentCategory==='cartridge'
+    ? lookups.cartridgeStatuses||[]
+    : lookups.statuses||[];
   const statusField = currentCategory==='hard_drive'?'drive_status_id':currentCategory==='cartridge'?'cartridge_status_id':'status_id';
 
   // Model options filtered to page category
@@ -1301,7 +1319,7 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
       </div>
 
       <FilterableTable
-        cols={[t('labelF'),t('modelF').replace(' *',''),'Details',t('locationF'),t('statusF'),'']}
+        cols={[t('labelF'),t('modelF').replace(' *',''),'Details',t('locationF'), isAddins ? t('etatF') : t('statusF'),'']}
         items={displayDevices}
         loading={loading}
         filterFields={filterFields}
@@ -1354,12 +1372,9 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
               </div>
             )}
 
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:12 }}>
               <FF label={t('modelF')} required>
                 <SearchableSelect options={modelOptions} value={form.device_model_id||''} onChange={v=>{setForm(p=>{const mdl=(lookups.models||[]).find((m:any)=>String(m.id)===v);const n={...p,device_model_id:v};if(mdl?.manufacturer_id)n.manufacturer_id=String(mdl.manufacturer_id);if(mdl?.device_type_id)n.device_type_id=String(mdl.device_type_id);return n;});}} placeholder={t('searchModel')}/>
-              </FF>
-              <FF label="Device Type">
-                <SearchableSelect options={typeOptions} value={form.device_type_id||''} onChange={v=>setForm(p=>({...p,device_type_id:v}))} placeholder="Auto from model or select…"/>
               </FF>
             </div>
 
@@ -1529,18 +1544,25 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
         }
       }
 
-      // 2. Stock alert: assigning removes device from stock.
-      // Warn if stock AFTER assignment would be < 10 (i.e. current stock <= 10).
-      const allR=await api('GET',`/devices?category=${devD.category}`);
-      if(allR.ok){
-        const inStockNow=countStock(allR.data,(d:Device)=>d.category===devD.category);
-        const afterAssign=inStockNow-1; // this device leaves stock
-        if(afterAssign<10){
-          setStockConfirm({
-            msg:t('stockMsg',{count:afterAssign,cat:devD.category.replace('_',' ')}),
-            onConfirm:()=>{ setStockConfirm(null); doAssign(); }
-          });
-          return;
+      // 2. Stock alert — only fire if this specific device is currently in a
+      // "stock" status (Reserved / InStock/New / InStock/Used), meaning assigning
+      // it actually removes it from available stock.
+      const STOCK_STATUS_NAMES = ['reserved','instock/new','instock/used','full'];
+      const deviceCurrentStatus = getStatus(devD)?.name ?? '';
+      const deviceIsInStock = STOCK_STATUS_NAMES.includes(deviceCurrentStatus.toLowerCase());
+
+      if (deviceIsInStock) {
+        const allR=await api('GET',`/devices?category=${devD.category}`);
+        if(allR.ok){
+          const inStockNow=countStock(allR.data,(d:Device)=>d.category===devD.category);
+          const afterAssign=inStockNow-1; // this device leaves stock
+          if(afterAssign<10){
+            setStockConfirm({
+              msg:t('stockMsg',{count:afterAssign,cat:devD.category.replace('_',' ')}),
+              onConfirm:()=>{ setStockConfirm(null); doAssign(); }
+            });
+            return;
+          }
         }
       }
     }
@@ -1605,7 +1627,7 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
       />
 
       {showModal && (
-        <Modal title={`New ${cfg.colA} → ${cfg.colB}`} onClose={()=>setShowModal(false)} width={460}>
+        <Modal title={`New ${cfg.colA} → ${cfg.colB}`} onClose={()=>setShowModal(false)} width={620}>
           <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
             <FF label={cfg.colA} required>
               <SearchableSelect options={optionsA} value={selA} onChange={setSelA} placeholder={cfg.selectA}/>
@@ -1697,7 +1719,7 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
       />
 
       {showModal && (
-        <Modal title="Move Device" onClose={()=>setShowModal(false)} width={460}>
+        <Modal title="Move Device" onClose={()=>setShowModal(false)} width={620}>
           <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
             <FF label="Device" required><SearchableSelect options={deviceOpts} value={selDevice} onChange={setSelDevice} placeholder={t('selectDevice')}/></FF>
             <FF label="Destination" required><SearchableSelect options={locOpts} value={selLoc} onChange={setSelLoc} placeholder={t('selectLoc')}/></FF>
@@ -1797,7 +1819,7 @@ function SwapPage({ pageId, toast }: { pageId:string; toast(m:string,ok:boolean)
         children={(item:any)=><>{cfg.rowFn(item)}</>}
       />
       {showModal && (
-        <Modal title={cfg.title} onClose={()=>setShowModal(false)} width={460}>
+        <Modal title={cfg.title} onClose={()=>setShowModal(false)} width={620}>
           <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
             <FF label={cfg.lA} required><SearchableSelect options={optsA} value={selA} onChange={setSelA} placeholder="Select…"/></FF>
             <FF label={cfg.lB} required><SearchableSelect options={optsB} value={selB} onChange={setSelB} placeholder="Select…"/></FF>
@@ -1820,7 +1842,14 @@ function LogsPage() {
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(()=>{ api('GET','/logs').then(r=>{ if(r.ok) setLogs(r.data); setLoading(false); }); },[]);
-  const ACTION_COLOR: Record<string,string> = { assigned:C.blue,unassigned:C.muted,moved:C.amber,location_swapped:C.purple,owner_swapped:'#ec4899',drive_assigned:C.cyan,drive_unassigned:C.muted,drive_swapped:C.cyan,cartridge_assigned:C.green,cartridge_unassigned:C.muted,cartridge_swapped:C.green,status_changed:C.amber };
+  const ACTION_COLOR: Record<string,string> = {
+    device_created:C.green, device_deleted:C.danger,
+    status_changed:C.amber, auto_stock_relocation:C.amber,
+    assigned:C.blue, unassigned:C.muted,
+    moved:C.amber, location_swapped:C.purple, owner_swapped:'#ec4899',
+    drive_assigned:C.cyan, drive_unassigned:C.muted, drive_swapped:C.cyan,
+    cartridge_assigned:C.green, cartridge_unassigned:C.muted, cartridge_swapped:C.green,
+  };
   return (
     <FilterableTable
       cols={['Device','Action','Details','Date']}

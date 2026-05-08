@@ -3,14 +3,27 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Device extends Model
 {
+    use SoftDeletes;
+
     protected $fillable = [
         'label', 'serial_number', 'device_type_id', 'category',
         'manufacturer_id', 'device_model_id', 'location_id', 'department_id',
         'user_id', 'status_id', 'drive_status_id', 'cartridge_status_id', 'comment',
     ];
+
+    /**
+     * SoftDeletes adds `deleted_at` to the dates array automatically.
+     * All normal queries (index, show, assignments …) automatically exclude
+     * soft-deleted rows via Eloquent's global scope.
+     *
+     * To query including deleted:  Device::withTrashed()->…
+     * To query only deleted:       Device::onlyTrashed()->…
+     * To restore:                  $device->restore()
+     */
 
     /* ─── Classification ───────────────────────────────────────────────── */
 
@@ -186,5 +199,13 @@ class Device extends Model
             return 'mobile';
         }
         return $this->category;
+    }
+
+    /**
+     * Whether this device has been soft-deleted.
+     */
+    public function isDeleted(): bool
+    {
+        return $this->deleted_at !== null;
     }
 }

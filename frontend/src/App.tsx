@@ -14,6 +14,18 @@ async function api(method: string, path: string, body?: object) {
   return { ok: res.ok, status: res.status, data };
 }
 
+// ─── Dynamic SheetJS loader ───────────────────────────────────────────────────
+async function loadSheetJS(): Promise<any> {
+  return new Promise(resolve => {
+    const w = window as any;
+    if (w.XLSX) { resolve(w.XLSX); return; }
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = () => resolve(w.XLSX);
+    document.head.appendChild(s);
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1116,10 +1128,10 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
   useEffect(()=>{ load(); setSelected(null); setForm({}); },[load]);
 
   const loadLookups = async()=>{
-    const [ty,mo,lo,de,st,ds,cs,us] = await Promise.all([
+    const [ty,mo,lo,de,st,ds,cs,us,mfr] = await Promise.all([
       api('GET','/device-types'), api('GET','/device-models'), api('GET','/locations'),
       api('GET','/departments'), api('GET','/statuses'), api('GET','/drive-statuses'),
-      api('GET','/cartridge-statuses'), api('GET','/users'),
+      api('GET','/cartridge-statuses'), api('GET','/users'), api('GET','/manufacturers'),
     ]);
     setLookups({
       types:ty.ok?ty.data:[],
@@ -1130,6 +1142,7 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
       driveStatuses:ds.ok?ds.data:[],
       cartridgeStatuses:cs.ok?cs.data:[],
       users:us.ok?us.data:[],
+      manufacturers:mfr.ok?mfr.data:[],
     });
   };
 
@@ -1141,6 +1154,7 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
         const mdl=(lookups.models||[]).find((m:any)=>String(m.id)===val);
         if(mdl?.manufacturer?.id) n.manufacturer_id=String(mdl.manufacturer.id);
         else if(mdl?.manufacturer_id) n.manufacturer_id=String(mdl.manufacturer_id);
+        if(mdl?.device_type_id) n.device_type_id=String(mdl.device_type_id);
       }
       return n;
     });
@@ -1167,9 +1181,22 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
     const cat = isAddins&&addinsTab==='cartridge'?'cartridge':isAddins?'hard_drive':pageCfg?.category;
     return (lookups.models||[]).filter((m:any)=>{
       const typeC=(lookups.types||[]).find((ty:any)=>ty.id===m.device_type_id)?.category;
-      return typeC===cat;
+      if (typeC!==cat) return false;
+      if (form.manufacturer_id && String(m.manufacturer_id)!==form.manufacturer_id) return false;
+      return true;
     });
-  },[lookups.models, lookups.types, pageId, addinsTab]);
+  },[lookups.models, lookups.types, pageId, addinsTab, form.manufacturer_id]);
+
+  // Manufacturers that have at least one model for the current category
+  const relevantManufacturers = useMemo(()=>{
+    const cat = isAddins&&addinsTab==='cartridge'?'cartridge':isAddins?'hard_drive':pageCfg?.category;
+    const mfrIds = new Set<number>();
+    (lookups.models||[]).forEach((m:any)=>{
+      const typeC=(lookups.types||[]).find((ty:any)=>ty.id===m.device_type_id)?.category;
+      if(typeC===cat) mfrIds.add(Number(m.manufacturer_id));
+    });
+    return (lookups.manufacturers||[]).filter((mfr:any)=>mfrIds.has(Number(mfr.id)));
+  },[lookups.models, lookups.types, lookups.manufacturers, pageId, addinsTab]);
 
   const modelOptions: SelectOption[] = relevantModels.map((m:any)=>({
     value:String(m.id), label:m.name, sub:m.manufacturer?.name||'',
@@ -1373,6 +1400,14 @@ function DevicePage({ pageId, toast }: { pageId:string; toast(msg:string,ok:bool
             )}
 
             <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:12 }}>
+              <FF label={t('manufacturerF')}>
+                <SearchableSelect
+                  options={relevantManufacturers.map((m:any)=>({value:String(m.id),label:m.name}))}
+                  value={form.manufacturer_id||''}
+                  onChange={v=>setForm(p=>({...p,manufacturer_id:v,device_model_id:''}))}
+                  placeholder="Filter by manufacturer…"
+                />
+              </FF>
               <FF label={t('modelF')} required>
                 <SearchableSelect options={modelOptions} value={form.device_model_id||''} onChange={v=>{setForm(p=>{const mdl=(lookups.models||[]).find((m:any)=>String(m.id)===v);const n={...p,device_model_id:v};if(mdl?.manufacturer_id)n.manufacturer_id=String(mdl.manufacturer_id);if(mdl?.device_type_id)n.device_type_id=String(mdl.device_type_id);return n;});}} placeholder={t('searchModel')}/>
               </FF>
@@ -1487,6 +1522,11 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
   const [selA, setSelA] = useState('');
   const [selB, setSelB] = useState('');
   const [stockConfirm, setStockConfirm] = useState<{msg:string;onConfirm():void}|null>(null);
+  // Separate bulk end state
+  const [showBulkEnd, setShowBulkEnd] = useState(false);
+  const [bulkEndSelected, setBulkEndSelected] = useState<Set<number>>(new Set());
+  const [bulkEndSearch, setBulkEndSearch] = useState('');
+  const [bulkEnding, setBulkEnding] = useState(false);
 
   const load=useCallback(async()=>{ setLoading(true); const r=await api('GET',cfg.ep); if(r.ok) setItems(r.data); setLoading(false); },[type]);
   useEffect(()=>{ load(); },[load]);
@@ -1579,6 +1619,18 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
     }
   };
 
+  const handleBulkEnd=async()=>{
+    if(bulkEndSelected.size===0) return;
+    setBulkEnding(true);
+    let ended=0;
+    for(const id of Array.from(bulkEndSelected)){
+      const r=await api('PUT',`${cfg.ep}/${id}/end`,{});
+      if(r.ok) ended++;
+    }
+    toast(`Ended ${ended} assignment(s)`,ended>0);
+    setShowBulkEnd(false); setBulkEnding(false); setBulkEndSelected(new Set()); load();
+  };
+
   const getA=(item:any)=>type==='user'?item.device:type==='drive'?item.hard_drive:item.cartridge;
   const getB=(item:any)=>type==='user'?item.user:type==='drive'?item.computer:item.printer;
   const active=items.filter(i=>!i.end_date).length;
@@ -1594,7 +1646,10 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
           <span style={{ color:'#475569' }}>{items.length} {t('records')} · </span>
           <span style={{ color:'#10b981', fontWeight:600 }}>{active} {t('active')}</span>
         </span>
-        <Btn onClick={openModal}>+ New Assignment</Btn>
+        <div style={{ display:'flex', gap:8 }}>
+          <Btn variant="ghost" onClick={()=>{ setBulkEndSearch(''); setBulkEndSelected(new Set()); setShowBulkEnd(true); }}>📦 Bulk End</Btn>
+          <Btn onClick={openModal}>+ New Assignment</Btn>
+        </div>
       </div>
 
       <FilterableTable
@@ -1606,7 +1661,6 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
           const a=getA(i); const b=getB(i);
           return (a?.label||a?.name||'').toLowerCase().includes(q.toLowerCase())||(b?.label||b?.name||'').toLowerCase().includes(q.toLowerCase());
         }}
-        bulkActions={[{ label:t('bulkEnd'), variant:'danger', onClick:async(ids)=>{ for(const id of ids)await handleEnd(id); }}]}
         children={(item:any)=>{
           const a=getA(item); const b=getB(item); const isActive=!item.end_date;
           return (
@@ -1647,6 +1701,62 @@ function AssignmentsPage({ type, toast }: { type:'user'|'drive'|'cartridge'; toa
         <ConfirmModal title={t('stockAlert')} message={stockConfirm.msg}
           onConfirm={stockConfirm.onConfirm} onCancel={()=>setStockConfirm(null)}/>
       )}
+
+      {/* Bulk End Modal — shows all active assignments for selection */}
+      {showBulkEnd && (()=>{
+        const activeItems=items.filter(i=>!i.end_date);
+        const filtered=activeItems.filter(i=>{
+          if(!bulkEndSearch) return true;
+          const a=getA(i); const b=getB(i);
+          return (a?.label||a?.name||'').toLowerCase().includes(bulkEndSearch.toLowerCase())||
+                 (b?.label||b?.name||'').toLowerCase().includes(bulkEndSearch.toLowerCase());
+        });
+        const inp2:React.CSSProperties={ padding:'6px 10px',borderRadius:6,border:`1px solid ${C.border2}`,background:C.inputBg,color:C.text,fontSize:12,outline:'none',width:'100%',fontFamily:'monospace' };
+        return (
+          <Modal title={`📦 Bulk End Assignments`} onClose={()=>setShowBulkEnd(false)} width={680}>
+            <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+              <div style={{ padding:'10px 14px', background:C.amber+'12', borderRadius:8, fontSize:12, color:C.amber }}>
+                Select active assignments to end. Only active assignments are shown.
+              </div>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <input value={bulkEndSearch} onChange={e=>setBulkEndSearch(e.target.value)}
+                  style={{ ...inp2, flex:1 }} placeholder="Search…"/>
+                <span style={{ fontSize:12, color:C.muted, whiteSpace:'nowrap' }}>{bulkEndSelected.size} selected</span>
+                <button onClick={()=>setBulkEndSelected(prev=>prev.size===filtered.length&&filtered.length>0?new Set():new Set(filtered.map((i:any)=>i.id)))}
+                  style={{ ...inp2, cursor:'pointer', color:C.blue, padding:'5px 10px', width:'auto' }}>
+                  {bulkEndSelected.size===filtered.length&&filtered.length>0?'Deselect All':'Select All'}
+                </button>
+              </div>
+              <div style={{ border:`1px solid ${C.border2}`, borderRadius:8, maxHeight:300, overflowY:'auto' }}>
+                {filtered.length===0&&<div style={{ padding:20, textAlign:'center', color:C.muted }}>No active assignments</div>}
+                {filtered.map((item:any)=>{
+                  const a=getA(item); const b=getB(item);
+                  const checked=bulkEndSelected.has(item.id);
+                  return (
+                    <div key={item.id} onClick={()=>setBulkEndSelected(prev=>{const n=new Set(prev);checked?n.delete(item.id):n.add(item.id);return n;})}
+                      style={{ display:'flex', alignItems:'center', gap:12, padding:'9px 14px',
+                        borderBottom:`1px solid ${C.border}`, cursor:'pointer',
+                        background:checked?C.danger+'10':'transparent' }}>
+                      <input type="checkbox" checked={checked} onChange={()=>{}} style={{ flexShrink:0 }}/>
+                      <div style={{ flex:1 }}>
+                        <span style={{ fontFamily:'monospace', color:C.text, fontSize:13 }}>{a?.label??a?.name??'—'}</span>
+                        <span style={{ color:C.muted, fontSize:12, marginLeft:10 }}>→ {b?.name??b?.label??'—'}</span>
+                      </div>
+                      <span style={{ fontSize:11, color:C.dim }}>{fmt(item.start_date)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display:'flex', justifyContent:'flex-end', gap:10 }}>
+                <Btn variant="ghost" onClick={()=>setShowBulkEnd(false)}>{t('cancel')}</Btn>
+                <Btn variant="danger" onClick={handleBulkEnd} disabled={bulkEndSelected.size===0||bulkEnding}>
+                  {bulkEnding?'Ending…':`End ${bulkEndSelected.size} Assignment(s)`}
+                </Btn>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
     </div>
   );
 }
@@ -1663,9 +1773,13 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
   const [locOpts, setLocOpts] = useState<SelectOption[]>([]);
   const [selDevice, setSelDevice] = useState('');
   const [selLoc, setSelLoc] = useState('');
-  const [bulkLoc, setBulkLoc] = useState('');
+  // Separate bulk move state
   const [showBulk, setShowBulk] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [bulkAllDevices, setBulkAllDevices] = useState<any[]>([]);
+  const [bulkSelected, setBulkSelected] = useState<Set<number>>(new Set());
+  const [bulkLoc, setBulkLoc] = useState('');
+  const [bulkSearch, setBulkSearch] = useState('');
+  const [bulkMoving, setBulkMoving] = useState(false);
 
   const load=useCallback(async()=>{ setLoading(true); const r=await api('GET','/movements'); if(r.ok) setItems(r.data); setLoading(false); },[]);
   useEffect(()=>{ load(); },[load]);
@@ -1678,6 +1792,14 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
     setShowModal(true);
   };
 
+  const openBulkModal=async()=>{
+    setBulkSelected(new Set()); setBulkLoc(''); setBulkSearch('');
+    const [dR,lR]=await Promise.all([api('GET','/devices'),api('GET','/locations')]);
+    if(dR.ok) setBulkAllDevices(dR.data);
+    if(lR.ok) setLocOpts(lR.data.map((l:any)=>({ value:String(l.id), label:l.name, sub:l.site?.name })));
+    setShowBulk(true);
+  };
+
   const handleMove=async()=>{
     const r=await api('POST','/movements',{ device_id:Number(selDevice), to_location_id:Number(selLoc) });
     if(r.ok){ toast('Device moved',true); setShowModal(false); load(); }
@@ -1685,16 +1807,29 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
   };
 
   const handleBulkMove=async()=>{
-    for(const id of selectedIds) {
-      await api('POST','/movements',{ device_id:id, to_location_id:Number(bulkLoc) });
+    if(!bulkLoc||bulkSelected.size===0) return;
+    setBulkMoving(true);
+    let moved=0;
+    for(const id of Array.from(bulkSelected)){
+      const r=await api('POST','/movements',{ device_id:id, to_location_id:Number(bulkLoc) });
+      if(r.ok) moved++;
     }
-    toast(`Moved ${selectedIds.length} devices`,true); setShowBulk(false); setBulkLoc(''); load();
+    toast(`Moved ${moved} device(s)`,moved>0);
+    setShowBulk(false); setBulkMoving(false); load();
   };
+
+  const inp:React.CSSProperties={ padding:'7px 10px',borderRadius:6,border:`1px solid ${C.border2}`,background:C.inputBg,color:C.text,fontSize:12,outline:'none',fontFamily:'monospace' };
+
+  const filteredBulkDevices = bulkAllDevices.filter(d=>
+    !bulkSearch||d.label?.toLowerCase().includes(bulkSearch.toLowerCase())||
+    d.category?.toLowerCase().includes(bulkSearch.toLowerCase())||
+    d.location?.name?.toLowerCase().includes(bulkSearch.toLowerCase())
+  );
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
       <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
-        {selectedIds.length>0 && <Btn variant="ghost" onClick={async()=>{ const lR=await api('GET','/locations'); if(lR.ok) setLocOpts(lR.data.map((l:any)=>({value:String(l.id),label:l.name,sub:l.site?.name}))); setShowBulk(true); }}>{t('bulkMove')} ({selectedIds.length})</Btn>}
+        <Btn variant="ghost" onClick={openBulkModal}>📦 {t('bulkMove')}</Btn>
         <Btn onClick={openModal}>+ {t('move')}</Btn>
       </div>
 
@@ -1707,7 +1842,6 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
           { key:'toSite', label:'To Site', getValue:(i:any)=>i.to_location?.site?.name||'' },
         ]}
         searchFn={(i:any,q)=>(i.device?.label||'').toLowerCase().includes(q.toLowerCase())}
-        bulkActions={[{ label:t('bulkMove'), onClick:(ids)=>setSelectedIds(ids) }]}
         children={(m:any)=>(
           <>
             <TD mono>{m.device?.label??`#${m.device_id}`}</TD>
@@ -1718,6 +1852,7 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
         )}
       />
 
+      {/* Single move modal */}
       {showModal && (
         <Modal title="Move Device" onClose={()=>setShowModal(false)} width={620}>
           <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
@@ -1731,14 +1866,52 @@ function MovementsPage({ toast }: { toast(m:string,ok:boolean):void }) {
         </Modal>
       )}
 
+      {/* Bulk move modal — loads ALL devices, not just those with movement history */}
       {showBulk && (
-        <Modal title={t('bulkMove')} onClose={()=>setShowBulk(false)} width={400}>
+        <Modal title={`📦 ${t('bulkMove')} — Select Devices`} onClose={()=>setShowBulk(false)} width={700}>
           <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-            <p style={{ color:'#94a3b8', fontSize:13 }}>Moving {selectedIds.length} devices to:</p>
-            <FF label="Destination"><SearchableSelect options={locOpts} value={bulkLoc} onChange={setBulkLoc} placeholder={t('selectLoc')}/></FF>
+            <div style={{ padding:'10px 14px', background:C.blue+'12', borderRadius:8, fontSize:12, color:C.blue }}>
+              Select any devices from the full inventory — including those never moved before.
+            </div>
+            <FF label="Destination" required>
+              <SearchableSelect options={locOpts} value={bulkLoc} onChange={setBulkLoc} placeholder={t('selectLoc')}/>
+            </FF>
+            <div>
+              <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+                <input value={bulkSearch} onChange={e=>setBulkSearch(e.target.value)}
+                  style={{ ...inp, flex:1 }} placeholder="Search devices…" />
+                <span style={{ fontSize:12, color:C.muted }}>{bulkSelected.size} selected</span>
+                <button onClick={()=>setBulkSelected(prev=>prev.size===filteredBulkDevices.length?new Set():new Set(filteredBulkDevices.map((d:any)=>d.id)))}
+                  style={{ ...inp, cursor:'pointer', color:C.blue, padding:'5px 10px' }}>
+                  {bulkSelected.size===filteredBulkDevices.length&&filteredBulkDevices.length>0?'Deselect All':'Select All'}
+                </button>
+              </div>
+              <div style={{ border:`1px solid ${C.border2}`, borderRadius:8, maxHeight:280, overflowY:'auto' }}>
+                {filteredBulkDevices.length===0&&<div style={{ padding:20, textAlign:'center', color:C.muted }}>No devices found</div>}
+                {filteredBulkDevices.map((d:any)=>{
+                  const checked=bulkSelected.has(d.id);
+                  const status=getStatus(d)?.name||'';
+                  return (
+                    <div key={d.id} onClick={()=>setBulkSelected(prev=>{const n=new Set(prev);checked?n.delete(d.id):n.add(d.id);return n;})}
+                      style={{ display:'flex', alignItems:'center', gap:12, padding:'9px 14px',
+                        borderBottom:`1px solid ${C.border}`, cursor:'pointer',
+                        background:checked?C.blue+'12':'transparent' }}>
+                      <input type="checkbox" checked={checked} onChange={()=>{}} style={{ flexShrink:0 }}/>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontFamily:'monospace', fontSize:13, color:C.text, fontWeight:checked?600:400 }}>{d.label}</div>
+                        <div style={{ fontSize:11, color:C.muted }}>{d.category.replace('_',' ')} · {d.location?.name||'No location'}</div>
+                      </div>
+                      {status&&<StatusBadge name={status}/>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
             <div style={{ display:'flex', justifyContent:'flex-end', gap:10 }}>
               <Btn variant="ghost" onClick={()=>setShowBulk(false)}>{t('cancel')}</Btn>
-              <Btn onClick={handleBulkMove} disabled={!bulkLoc}>{t('confirm')}</Btn>
+              <Btn onClick={handleBulkMove} disabled={bulkSelected.size===0||!bulkLoc||bulkMoving}>
+                {bulkMoving?'Moving…':`${t('move')} ${bulkSelected.size} Device(s)`}
+              </Btn>
             </div>
           </div>
         </Modal>
@@ -1894,6 +2067,8 @@ function SettingsPage({ toast }: { toast(m:string,ok:boolean):void }) {
   const [allMfrs, setAllMfrs] = useState<LookupItem[]>([]);
   const [allDepts, setAllDepts] = useState<LookupItem[]>([]);
   const [allUsers, setAllUsers] = useState<LookupItem[]>([]);
+  const [importResult, setImportResult] = useState<{created:number;skipped:number;errors:string[];message:string}|null>(null);
+  const [importing, setImporting] = useState(false);
 
   const REF_TABS = [
     { id:'sites', label:'Sites', ep:'/sites' },
@@ -2096,82 +2271,622 @@ function SettingsPage({ toast }: { toast(m:string,ok:boolean):void }) {
       {/* Import/Export tab */}
       {tab==='importExport' && (
         <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
-          {/* CSV Export */}
-          <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20 }}>
-            <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:6 }}>⬇ Export CSV</div>
-            <div style={{ fontSize:12, color:C.muted, marginBottom:14 }}>
-              Download all devices as a UTF-8 CSV file (opens in Excel).
-            </div>
-            <Btn onClick={()=>{ window.open(`${BASE}/export/csv`, '_blank'); }}>⬇ Download CSV</Btn>
+
+          {/* Info banner */}
+          <div style={{ padding:'12px 16px', background:C.blue+'10', border:`1px solid ${C.blue}30`, borderRadius:10, fontSize:12, color:C.blue, lineHeight:1.7 }}>
+            The Excel workbook uses <strong>6 sheets</strong>: <em>Computers · Phones · Printers · Monitors · Cartridges · Disks</em>.
+            Device type / category is auto-derived from the sheet name — no category column needed.
+            <strong> Note:</strong> rows whose Label already exists in the system are skipped (no duplicate labels allowed).
           </div>
 
-          {/* JSON Export */}
-          <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20 }}>
-            <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:6 }}>⬇ Export Full JSON</div>
-            <div style={{ fontSize:12, color:C.muted, marginBottom:14 }}>
-              Export devices, assignments, movements and logs as JSON (for backup or re-import).
-            </div>
-            <Btn onClick={async()=>{
-              const r=await api('GET','/export');
-              if(!r.ok){ toast('Export failed',false); return; }
-              const blob=new Blob([JSON.stringify(r.data,null,2)],{type:'application/json'});
-              const url=URL.createObjectURL(blob);
-              const a=document.createElement('a'); a.href=url;
-              a.download=`inventory_export_${Date.now()}.json`; a.click();
-              URL.revokeObjectURL(url);
-              toast(`Exported ${r.data.summary?.devices||0} devices`,true);
-            }}>⬇ {t('exportExcel')}</Btn>
-          </div>
+          {/* 3 action cards */}
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:14 }}>
 
-          {/* JSON Import */}
-          <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20 }}>
-            <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:6 }}>⬆ {t('importExcel')}</div>
-            <div style={{ fontSize:12, color:C.muted, marginBottom:14 }}>
-              Import devices from a JSON file (exported format). Each row needs:
-              <code style={{ display:'block', marginTop:6, padding:'6px 10px', background:C.bg, borderRadius:6, fontSize:11, color:C.green }}>
-                label*, serial_number*, category*, device_type*, model, location, status, cpu, ram, imei, phone_number…
-              </code>
+            {/* ── EXPORT ── */}
+            <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20, display:'flex', flexDirection:'column', gap:12 }}>
+              <div style={{ fontSize:20 }}>⬇</div>
+              <div style={{ fontSize:13, fontWeight:700, color:C.text }}>Export to Excel</div>
+              <div style={{ fontSize:12, color:C.muted, flex:1, lineHeight:1.6 }}>
+                Downloads all current inventory as a formatted <code>.xlsx</code> — one sheet per device type, same column layout as the template.
+              </div>
+              <Btn onClick={async()=>{
+                const XLSX = await loadSheetJS();
+                const r = await api('GET', '/devices');
+                if (!r.ok) { toast('Export failed', false); return; }
+                const all: Device[] = r.data;
+                const wb = XLSX.utils.book_new();
+                const mkSheet = (rows: Record<string,any>[], cols: string[]) => {
+                  const ws = XLSX.utils.aoa_to_sheet([cols, ...rows.map(r2 => cols.map(c => r2[c] ?? ''))]);
+                  ws['!cols'] = cols.map(c => ({ wch: Math.max(c.length + 2, 16) }));
+                  return ws;
+                };
+                const fmtD = (s?: string) => s ? new Date(s).toLocaleDateString('en-GB') : '';
+                const computers = all.filter(d => d.category === 'computer' && d.device_type?.name !== 'Phone');
+                XLSX.utils.book_append_sheet(wb, mkSheet(computers.map(d => ({
+                  'Computer Name': d.label, 'Model': d.device_model?.name ?? '', 'Serial Number': d.serial_number ?? '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Site': d.location?.site?.name ?? '', 'Location': d.location?.name ?? '',
+                  'Department': d.department?.name ?? '', 'Owner': d.user?.name ?? '',
+                  'Device Kind': d.device_type?.name ?? '', 'Status': d.status?.name ?? '',
+                  'Modified': fmtD(d.created_at), 'Modified By': '', 'Comments': d.comment ?? '',
+                })), ['Computer Name','Model','Serial Number','Manufacturer','Site','Location','Department','Owner','Device Kind','Status','Modified','Modified By','Comments']), 'Computers');
+                const phones = all.filter(d => d.category === 'computer' && d.device_type?.name === 'Phone');
+                XLSX.utils.book_append_sheet(wb, mkSheet(phones.map(d => ({
+                  'Name': d.label, 'S/N': d.serial_number ?? '', 'IMEI': d.computer?.imei ?? '',
+                  'Model': d.device_model?.name ?? '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Phone Number': d.computer?.phone_number ?? '', 'User': d.user?.name ?? '',
+                })), ['Name','S/N','IMEI','Model','Manufacturer','Phone Number','User']), 'Phones');
+                const printers = all.filter(d => d.category === 'printer');
+                XLSX.utils.book_append_sheet(wb, mkSheet(printers.map(d => ({
+                  'Printer Name': d.label, 'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Model': d.device_model?.name ?? '', 'S/N': d.serial_number ?? '',
+                  'Department': d.department?.name ?? '', 'Location': d.location?.name ?? '',
+                  'Status': d.status?.name ?? '', 'Owner': d.user?.name ?? '',
+                })), ['Printer Name','Manufacturer','Model','S/N','Department','Location','Status','Owner']), 'Printers');
+                const monitors = all.filter(d => d.category === 'monitor');
+                XLSX.utils.book_append_sheet(wb, mkSheet(monitors.map(d => ({
+                  'Monitor Name': d.label, 'S/N': d.serial_number ?? '', 'Model': d.device_model?.name ?? '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Site': d.location?.site?.name ?? '', 'Location': d.location?.name ?? '',
+                  'Department': d.department?.name ?? '', 'Status': d.status?.name ?? '', 'Comment': d.comment ?? '',
+                })), ['Monitor Name','S/N','Model','Manufacturer','Site','Location','Department','Status','Comment']), 'Monitors');
+                const cartridges = all.filter(d => d.category === 'cartridge');
+                XLSX.utils.book_append_sheet(wb, mkSheet(cartridges.map(d => ({
+                  'Cartridge Name': d.label, 'Reference': d.cartridge?.printer_compatibility ?? '', 'Colors': '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Compatible Printers': d.cartridge?.printer_compatibility ?? '',
+                  'Department': d.department?.name ?? '', 'Total Stock': 1, 'Installed': 0, 'Comment': d.comment ?? '',
+                })), ['Cartridge Name','Reference','Colors','Manufacturer','Compatible Printers','Department','Total Stock','Installed','Comment']), 'Cartridges');
+                const disks = all.filter(d => d.category === 'hard_drive');
+                XLSX.utils.book_append_sheet(wb, mkSheet(disks.map(d => ({
+                  'Disk Name': d.label, 'S/N': d.serial_number ?? '', 'Model': d.device_model?.name ?? '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Type': d.hard_drive?.drive_type ?? '', 'Etat': (d as any).drive_status?.name ?? '',
+                  'Capacity (GB)': d.hard_drive?.capacity_gb ?? '',
+                })), ['Disk Name','S/N','Model','Manufacturer','Type','Etat','Capacity (GB)']), 'Disks');
+                XLSX.writeFile(wb, `inventory_export_${new Date().toISOString().slice(0,10)}.xlsx`);
+                toast(`Exported ${all.length} devices (6 sheets)`, true);
+              }}>⬇ Export (.xlsx)</Btn>
             </div>
-            <label style={{ cursor:'pointer', display:'inline-block' }}>
-              <span style={{ padding:'8px 16px', borderRadius:6, background:C.blue, color:'#fff', fontSize:13, fontWeight:600, cursor:'pointer' }}>⬆ Choose JSON File</span>
-              <input type="file" accept=".json" style={{ display:'none' }} onChange={async(e)=>{
-                const file=e.target.files?.[0]; if(!file) return;
-                try {
-                  const text=await file.text();
-                  const parsed=JSON.parse(text);
-                  // Accept either { devices: [...] } (export format) or raw array
-                  const rows=Array.isArray(parsed)?parsed:(parsed.devices||[]);
-                  if(!rows.length){ toast('No devices found in file',false); return; }
-                  const r=await api('POST','/import',{ devices:rows });
-                  if(r.ok||r.status===207){
-                    toast(`${r.data.message} ${r.data.errors?.length?' ('+r.data.errors.length+' errors)':''}`,r.status!==207);
-                  } else {
-                    toast(r.data?.message||'Import failed',false);
+
+            {/* ── IMPORT ── */}
+            <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20, display:'flex', flexDirection:'column', gap:12 }}>
+              <div style={{ fontSize:20 }}>⬆</div>
+              <div style={{ fontSize:13, fontWeight:700, color:C.text }}>Import from Excel</div>
+              <div style={{ fontSize:12, color:C.muted, flex:1, lineHeight:1.6 }}>
+                Upload an <code>.xlsx</code> file. Sheet names must be: <strong>Computers, Phones, Printers, Monitors, Cartridges, Disks</strong>.
+                Device type and category are auto-filled from the sheet.
+                Rows with duplicate labels are skipped — full results shown below.
+              </div>
+              {importing && <div style={{ fontSize:12, color:C.blue }}>⏳ Reading file and importing…</div>}
+              <label style={{ cursor:'pointer', display:'block', marginTop:'auto' }}>
+                <span style={{ display:'block', padding:'8px 0', borderRadius:6, background:importing?C.dim:C.blue, color:'#fff', fontSize:13, fontWeight:600, cursor:importing?'default':'pointer', textAlign:'center' }}>
+                  ⬆ Choose File (.xlsx)
+                </span>
+                <input type="file" accept=".xlsx,.xls" style={{ display:'none' }} disabled={importing} onChange={async(e)=>{
+                  const file = e.target.files?.[0]; if (!file) return;
+                  setImporting(true); setImportResult(null);
+                  try {
+                    const XLSX = await loadSheetJS();
+                    const ab = await file.arrayBuffer();
+                    const wb2 = XLSX.read(ab, { type: 'array' });
+                    const devices: any[] = [];
+
+                    const detectPrinterType = (model: string, mfr: string): string => {
+                      const s = (model + ' ' + mfr).toLowerCase();
+                      return s.includes('inkjet')||s.includes('ecotank')||s.includes('et-')||s.includes('stylus') ? 'inkjet' : 'laser';
+                    };
+                    const detectInkType = (compat: string, model: string): string => {
+                      const s = (compat + ' ' + model).toLowerCase();
+                      return s.includes('inkjet')||s.includes('t502')||s.includes('ecotank') ? 'inkjet' : 'laser';
+                    };
+                    // Normalise a header key: lowercase, collapse non-alphanum to single _
+                    const norm = (row: any): Record<string,string> => {
+                      const n: Record<string,string> = {};
+                      Object.entries(row).forEach(([k,v]) => {
+                        const key = k.toLowerCase().replace(/[\s/()\-\.]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'');
+                        n[key] = String(v ?? '').trim();
+                      });
+                      return n;
+                    };
+
+                    for (const sheetName of wb2.SheetNames) {
+                      const ws2 = wb2.Sheets[sheetName];
+                      const rows: any[] = XLSX.utils.sheet_to_json(ws2, { defval: '' });
+                      const sn = sheetName.toLowerCase();
+
+                      for (const row of rows) {
+                        const n = norm(row);
+
+                        if (sn.includes('computer') || sn.includes('pc') || sn.includes('laptop')) {
+                          const label = n['computer_name']||n['label']||n['name']||n['computer']||'';
+                          if (!label) continue;
+                          devices.push({
+                            label,
+                            serial_number: n['serial_number']||n['s_n']||n['sn']||n['serial']||'',
+                            device_type:   n['device_kind']||n['type']||n['device_type']||'Laptop',
+                            model:         n['model']||'',
+                            location:      n['location']||'',
+                            department:    n['department']||'',
+                            status:        n['status']||'',
+                            comment:       n['comments']||n['comment']||'',
+                          });
+
+                        } else if (sn.includes('phone') || sn.includes('mobile')) {
+                          const label = n['name']||n['label']||n['phone_name']||'';
+                          if (!label) continue;
+                          devices.push({
+                            label,
+                            serial_number: n['s_n']||n['serial_number']||n['sn']||'',
+                            device_type:   'Phone',
+                            model:         n['model']||'',
+                            imei:          n['imei']||'',
+                            phone_number:  n['phone_number']||n['phone']||'',
+                            comment:       n['comment']||n['comments']||'',
+                          });
+
+                        } else if (sn.includes('print')) {
+                          const label = n['printer_name']||n['label']||n['name']||'';
+                          if (!label) continue;
+                          const model = n['model']||''; const mfr = n['manufacturer']||'';
+                          devices.push({
+                            label,
+                            serial_number: n['s_n']||n['serial_number']||n['sn']||'',
+                            device_type:   'Printer',
+                            model, location: n['location']||'',
+                            department: n['department']||'', status: n['status']||'',
+                            printer_type: detectPrinterType(model, mfr),
+                            duplex:        (n['duplex']||'').toLowerCase()==='yes'?1:0,
+                            color_support: (n['color']||n['colour']||'').toLowerCase()==='yes'?1:0,
+                            comment:       n['comment']||n['comments']||'',
+                          });
+
+                        } else if (sn.includes('monitor')) {
+                          const label = n['monitor_name']||n['label']||n['name']||'';
+                          if (!label) continue;
+                          devices.push({
+                            label,
+                            serial_number: n['s_n']||n['serial_number']||n['sn']||'',
+                            device_type:   'Monitor',
+                            model: n['model']||'', location: n['location']||'',
+                            department: n['department']||'', status: n['status']||'',
+                            comment: n['comment']||n['comments']||'',
+                          });
+
+                        } else if (sn.includes('cart')) {
+                          const label = n['cartridge_name']||n['label']||n['name']||'';
+                          if (!label) continue;
+                          const compat = n['compatible_printers']||n['compatibility']||n['reference']||'';
+                          const model  = n['model']||'';
+                          devices.push({
+                            label,
+                            serial_number: n['reference']||n['s_n']||n['serial_number']||'',
+                            device_type:   'Cartridge', model,
+                            printer_compatibility: compat,
+                            ink_type: detectInkType(compat, model),
+                            department: n['department']||'',
+                            comment: n['comment']||n['comments']||'',
+                          });
+
+                        } else if (sn.includes('disk')||sn.includes('disque')||sn.includes('drive')||sn.includes('disq')) {
+                          const label = n['disk_name']||n['disque_name']||n['label']||n['name']||'';
+                          if (!label) continue;
+                          const rawCap = n['capacity_gb']||n['capacity']||'0';
+                          devices.push({
+                            label,
+                            serial_number: n['s_n']||n['serial_number']||n['sn']||'',
+                            device_type:   'Hard Drive',
+                            model: n['model']||'',
+                            drive_type: (n['type']||'HDD').toUpperCase().replace('NVME','NVMe'),
+                            capacity_gb: parseInt(rawCap)||0,
+                            status: n['etat']||n['état']||n['status']||'',
+                            comment: n['comment']||n['comments']||'',
+                          });
+                        }
+                      }
+                    }
+
+                    if (!devices.length) {
+                      setImportResult({ created:0, skipped:0, errors:['No rows found. Check sheet names: Computers, Phones, Printers, Monitors, Cartridges, Disks'], message:'Nothing imported.' });
+                      setImporting(false); return;
+                    }
+
+                    const r2 = await api('POST', '/import', { devices });
+                    const result = r2.data;
+                    setImportResult({
+                      created: result.created ?? 0,
+                      skipped: result.skipped ?? 0,
+                      errors:  result.errors  ?? [],
+                      message: result.message ?? '',
+                    });
+                    if (result.created > 0) toast(`✓ ${result.created} device(s) imported`, true);
+                    else toast(`Import complete — ${result.skipped} skipped. See details below.`, false);
+                  } catch(err: any) {
+                    setImportResult({ created:0, skipped:0, errors:['File read error: '+(err?.message||String(err))], message:'Import failed.' });
+                    toast('Could not read file', false);
                   }
-                } catch(err) { toast('Invalid JSON file',false); }
-                // Reset file input
-                e.target.value='';
-              }}/>
-            </label>
+                  setImporting(false);
+                  e.target.value = '';
+                }}/>
+              </label>
+            </div>
+         
+            {/* ── TEMPLATE ── */}
+            <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20, display:'flex', flexDirection:'column', gap:12 }}>
+              <div style={{ fontSize:20 }}>📄</div>
+              <div style={{ fontSize:13, fontWeight:700, color:C.text }}>Download Template</div>
+              <div style={{ fontSize:12, color:C.muted, flex:1, lineHeight:1.6 }}>
+                Blank <code>.xlsx</code> with the correct 6-sheet structure and one sample row per sheet.
+                Fill it in with your own device labels (unique names not already in the system) and import.
+              </div>
+              <Btn variant="ghost" onClick={async()=>{
+                const XLSX = await loadSheetJS();
+                const wb3 = XLSX.utils.book_new();
+                const mkTpl = (cols: string[], sample: Record<string,any>) => {
+                  const ws3 = XLSX.utils.aoa_to_sheet([cols, cols.map(c => sample[c] ?? '')]);
+                  ws3['!cols'] = cols.map(c => ({ wch: Math.max(c.length + 2, 16) }));
+                  return ws3;
+                };
+                XLSX.utils.book_append_sheet(wb3, mkTpl(
+                  ['Computer Name','Model','Serial Number','Manufacturer','Site','Location','Department','Owner','Device Kind','Status','Modified','Modified By','Comments'],
+                  { 'Computer Name':'NEW-PC-001','Model':'ThinkPad T14','Serial Number':'NEW-SN-PC-001','Manufacturer':'Lenovo','Site':'LILLY','Location':'IT Office','Department':'IT','Owner':'','Device Kind':'Laptop','Status':'Reserved','Modified':'','Modified By':'','Comments':'' }
+                ), 'Computers');
+                XLSX.utils.book_append_sheet(wb3, mkTpl(
+                  ['Name','S/N','IMEI','Model','Manufacturer','Phone Number','User'],
+                  { 'Name':'NEW-PHN-001','S/N':'NEW-SN-PHN-001','IMEI':'352999009999001','Model':'Galaxy S23','Manufacturer':'Samsung','Phone Number':'+212600099001','User':'' }
+                ), 'Phones');
+                XLSX.utils.book_append_sheet(wb3, mkTpl(
+                  ['Printer Name','Manufacturer','Model','S/N','Department','Location','Status','Owner'],
+                  { 'Printer Name':'NEW-PRN-001','Manufacturer':'HP','Model':'LaserJet Pro M404n','S/N':'NEW-SN-PRN-001','Department':'IT','Location':'IT Office','Status':'Reserved','Owner':'' }
+                ), 'Printers');
+                XLSX.utils.book_append_sheet(wb3, mkTpl(
+                  ['Monitor Name','S/N','Model','Manufacturer','Site','Location','Department','Status','Comment'],
+                  { 'Monitor Name':'NEW-MON-001','S/N':'NEW-SN-MON-001','Model':'UltraSharp U2722D','Manufacturer':'Dell','Site':'LILLY','Location':'IT Office','Department':'IT','Status':'Reserved','Comment':'' }
+                ), 'Monitors');
+                XLSX.utils.book_append_sheet(wb3, mkTpl(
+                  ['Cartridge Name','Reference','Colors','Manufacturer','Compatible Printers','Department','Total Stock','Installed','Comment'],
+                  { 'Cartridge Name':'NEW-CART-001','Reference':'HP 85A','Colors':'Black','Manufacturer':'HP','Compatible Printers':'LaserJet Pro M404n','Department':'IT','Total Stock':1,'Installed':0,'Comment':'' }
+                ), 'Cartridges');
+                XLSX.utils.book_append_sheet(wb3, mkTpl(
+                  ['Disk Name','S/N','Model','Manufacturer','Type','Etat','Capacity (GB)'],
+                  { 'Disk Name':'NEW-HDD-001','S/N':'NEW-SN-HDD-001','Model':'Barracuda 1TB HDD','Manufacturer':'Seagate','Type':'HDD','Etat':'Available','Capacity (GB)':1000 }
+                ), 'Disks');
+                XLSX.writeFile(wb3, 'inventory_template.xlsx');
+                toast('Template downloaded', true);
+              }}>⬇ Template (.xlsx)</Btn>
+            </div>
           </div>
 
-          {/* Template download */}
-          <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20 }}>
-            <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:6 }}>📄 Import Template</div>
-            <div style={{ fontSize:12, color:C.muted, marginBottom:14 }}>Download a sample JSON template to fill in.</div>
-            <Btn variant="ghost" onClick={()=>{
-              const template={ devices:[
-                { label:'PC-001', serial_number:'SN-001', category:'computer', device_type:'Laptop', model:'ThinkPad T14', location:'IT Office', status:'Reserved', department:'IT', cpu:'Intel i5', ram:'16GB DDR4', comment:'Sample import' },
-                { label:'PRN-001', serial_number:'SN-002', category:'printer', device_type:'Printer', model:'LaserJet Pro M404n', location:'HR Office', status:'Reserved', printer_type:'laser', duplex:'true', color:'false' },
-              ]};
-              const blob=new Blob([JSON.stringify(template,null,2)],{type:'application/json'});
-              const url=URL.createObjectURL(blob);
-              const a=document.createElement('a'); a.href=url; a.download='import_template.json'; a.click();
-              URL.revokeObjectURL(url);
-            }}>⬇ Download Template</Btn>
-          </div>
+          {/* ── IMPORT RESULT PANEL ── */}
+          {importResult && (
+            <div style={{ background:C.surface, border:`1px solid ${importResult.created>0?C.green:C.amber}30`, borderRadius:10, padding:20 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:12 }}>
+                <span style={{ fontSize:18 }}>{importResult.created>0?'✅':'⚠️'}</span>
+                <div style={{ fontSize:13, fontWeight:700, color:C.text }}>{importResult.message}</div>
+                <button onClick={()=>setImportResult(null)} style={{ marginLeft:'auto', background:'none', border:'none', color:C.muted, cursor:'pointer', fontSize:16 }}>×</button>
+              </div>
+              <div style={{ display:'flex', gap:20, marginBottom:12 }}>
+                <div style={{ textAlign:'center' }}>
+                  <div style={{ fontSize:24, fontWeight:700, color:C.green }}>{importResult.created}</div>
+                  <div style={{ fontSize:11, color:C.muted }}>Created</div>
+                </div>
+                <div style={{ textAlign:'center' }}>
+                  <div style={{ fontSize:24, fontWeight:700, color:C.amber }}>{importResult.skipped}</div>
+                  <div style={{ fontSize:11, color:C.muted }}>Skipped</div>
+                </div>
+                <div style={{ textAlign:'center' }}>
+                  <div style={{ fontSize:24, fontWeight:700, color:C.danger }}>{importResult.errors.length}</div>
+                  <div style={{ fontSize:11, color:C.muted }}>Errors</div>
+                </div>
+              </div>
+              {importResult.errors.length > 0 && (
+                <div style={{ borderTop:`1px solid ${C.border2}`, paddingTop:10 }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:C.muted, textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:8 }}>
+                    Skip / Error Details
+                  </div>
+                  <div style={{ maxHeight:200, overflowY:'auto', display:'flex', flexDirection:'column', gap:4 }}>
+                    {importResult.errors.map((err,i) => (
+                      <div key={i} style={{ fontSize:11, color:C.amber, fontFamily:'monospace', padding:'4px 8px', background:C.amber+'08', borderRadius:4 }}>
+                        {err}
+                      </div>
+                    ))}
+                  </div>
+                  {importResult.skipped > 0 && importResult.errors.length < importResult.skipped && (
+                    <div style={{ fontSize:11, color:C.muted, marginTop:6 }}>
+                      + {importResult.skipped - importResult.errors.length} row(s) skipped because their label already exists in the system.
+                    </div>
+                  )}
+                </div>
+              )}
+              {importResult.skipped > 0 && importResult.errors.length === 0 && (
+                <div style={{ fontSize:12, color:C.amber, marginTop:4 }}>
+                  All {importResult.skipped} row(s) were skipped because their <strong>Label</strong> already exists in the inventory.
+                  Use different labels to import new devices, or export the current inventory to see what labels are taken.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
+            <div>
+              <Btn onClick={async()=>{
+              const XLSX = await loadSheetJS();
+              const r = await api('GET', '/devices');
+              if (!r.ok) { toast('Export failed', false); return; }
+              const all: Device[] = r.data;
+              const wb = XLSX.utils.book_new();
+
+              // Helper: create a sheet from an array-of-objects with explicit column order
+              const mkSheet = (rows: Record<string,any>[], cols: string[]) => {
+                const ws = XLSX.utils.aoa_to_sheet([cols, ...rows.map(r2 => cols.map(c => r2[c] ?? ''))]);
+                ws['!cols'] = cols.map(c => ({ wch: Math.max(c.length + 2, 16) }));
+                return ws;
+              };
+
+              const fmtD = (s?: string) => s ? new Date(s).toLocaleDateString('en-GB') : '';
+
+              // ── Computers ──────────────────────────────────────────────────
+              const computers = all.filter(d => d.category === 'computer' && d.device_type?.name !== 'Phone');
+              XLSX.utils.book_append_sheet(wb, mkSheet(
+                computers.map(d => ({
+                  'Computer Name':  d.label,
+                  'Model':          d.device_model?.name ?? '',
+                  'Serial Number':  d.serial_number ?? '',
+                  'Manufacturer':   d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Site':           d.location?.site?.name ?? '',
+                  'Location':       d.location?.name ?? '',
+                  'Department':     d.department?.name ?? '',
+                  'Owner':          d.user?.name ?? '',
+                  'Device Kind':    d.device_type?.name ?? '',
+                  'Status':         d.status?.name ?? '',
+                  'Modified':       fmtD(d.created_at),
+                  'Modified By':    '',
+                  'Comments':       d.comment ?? '',
+                })),
+                ['Computer Name','Model','Serial Number','Manufacturer','Site','Location','Department','Owner','Device Kind','Status','Modified','Modified By','Comments']
+              ), 'Computers');
+
+              // ── Phones ─────────────────────────────────────────────────────
+              const phones = all.filter(d => d.category === 'computer' && d.device_type?.name === 'Phone');
+              XLSX.utils.book_append_sheet(wb, mkSheet(
+                phones.map(d => ({
+                  'Name':         d.label,
+                  'S/N':          d.serial_number ?? '',
+                  'IMEI':         d.computer?.imei ?? '',
+                  'Model':        d.device_model?.name ?? '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Phone Number': d.computer?.phone_number ?? '',
+                  'User':         d.user?.name ?? '',
+                })),
+                ['Name','S/N','IMEI','Model','Manufacturer','Phone Number','User']
+              ), 'Phones');
+
+              // ── Printers ───────────────────────────────────────────────────
+              const printers = all.filter(d => d.category === 'printer');
+              XLSX.utils.book_append_sheet(wb, mkSheet(
+                printers.map(d => ({
+                  'Printer Name': d.label,
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Model':        d.device_model?.name ?? '',
+                  'S/N':          d.serial_number ?? '',
+                  'Department':   d.department?.name ?? '',
+                  'Location':     d.location?.name ?? '',
+                  'Status':       d.status?.name ?? '',
+                  'Owner':        d.user?.name ?? '',
+                })),
+                ['Printer Name','Manufacturer','Model','S/N','Department','Location','Status','Owner']
+              ), 'Printers');
+
+              // ── Monitors ───────────────────────────────────────────────────
+              const monitors = all.filter(d => d.category === 'monitor');
+              XLSX.utils.book_append_sheet(wb, mkSheet(
+                monitors.map(d => ({
+                  'Monitor Name': d.label,
+                  'S/N':          d.serial_number ?? '',
+                  'Model':        d.device_model?.name ?? '',
+                  'Manufacturer': d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Site':         d.location?.site?.name ?? '',
+                  'Location':     d.location?.name ?? '',
+                  'Department':   d.department?.name ?? '',
+                  'Status':       d.status?.name ?? '',
+                  'Comment':      d.comment ?? '',
+                })),
+                ['Monitor Name','S/N','Model','Manufacturer','Site','Location','Department','Status','Comment']
+              ), 'Monitors');
+
+              // ── Cartridges ─────────────────────────────────────────────────
+              const cartridges = all.filter(d => d.category === 'cartridge');
+              XLSX.utils.book_append_sheet(wb, mkSheet(
+                cartridges.map(d => ({
+                  'Cartridge Name':     d.label,
+                  'Reference':          d.cartridge?.printer_compatibility ?? '',
+                  'Colors':             '',
+                  'Manufacturer':       d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Compatible Printers':d.cartridge?.printer_compatibility ?? '',
+                  'Department':         d.department?.name ?? '',
+                  'Total Stock':        1,
+                  'Installed':          0,
+                  'Comment':            d.comment ?? '',
+                })),
+                ['Cartridge Name','Reference','Colors','Manufacturer','Compatible Printers','Department','Total Stock','Installed','Comment']
+              ), 'Cartridges');
+
+              // ── Disks ──────────────────────────────────────────────────────
+              const disks = all.filter(d => d.category === 'hard_drive');
+              XLSX.utils.book_append_sheet(wb, mkSheet(
+                disks.map(d => ({
+                  'Disk Name':     d.label,
+                  'S/N':           d.serial_number ?? '',
+                  'Model':         d.device_model?.name ?? '',
+                  'Manufacturer':  d.manufacturer?.name ?? (d as any).device_model?.manufacturer?.name ?? '',
+                  'Type':          d.hard_drive?.drive_type ?? '',
+                  'Etat':          (d as any).drive_status?.name ?? '',
+                  'Capacity (GB)': d.hard_drive?.capacity_gb ?? '',
+                })),
+                ['Disk Name','S/N','Model','Manufacturer','Type','Etat','Capacity (GB)']
+              ), 'Disks');
+
+              XLSX.writeFile(wb, `inventory_export_${new Date().toISOString().slice(0,10)}.xlsx`);
+              toast(`Exported ${all.length} devices (6 sheets)`, true);
+            }}>⬇ Export (.xlsx)</Btn>
+            </div>
+
+            {/* ── IMPORT ── */}
+            <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:10, padding:20, display:'flex', flexDirection:'column', gap:12 }}>
+              <div style={{ fontSize:20 }}>⬆</div>
+              <div style={{ fontSize:13, fontWeight:700, color:C.text }}>Import from Excel</div>
+              <div style={{ fontSize:12, color:C.muted, flex:1, lineHeight:1.6 }}>
+                Upload an <code>.xlsx</code> file (the exported file or the template). Each sheet is read by name — device type and category are <strong>auto-detected</strong> from the sheet name, no extra columns needed.
+                Rows with a label already in the system are skipped.
+              </div>
+              <label style={{ cursor:'pointer', display:'block', marginTop:'auto' }}>
+                <span style={{ display:'block', padding:'8px 0', borderRadius:6, background:C.blue, color:'#fff', fontSize:13, fontWeight:600, cursor:'pointer', textAlign:'center' }}>⬆ Choose File (.xlsx)</span>
+                <input type="file" accept=".xlsx,.xls" style={{ display:'none' }} onChange={async(e)=>{
+                  const file = e.target.files?.[0]; if (!file) return;
+                  try {
+                    const XLSX = await loadSheetJS();
+                    const ab = await file.arrayBuffer();
+                    const wb2 = XLSX.read(ab, { type: 'array' });
+                    const devices: any[] = [];
+
+                    // ── Detect printer_type from model/manufacturer name ──
+                    const detectPrinterType = (model: string, mfr: string): string => {
+                      const combined = (model + ' ' + mfr).toLowerCase();
+                      if (combined.includes('inkjet') || combined.includes('ecotank') ||
+                          combined.includes('et-') || combined.includes('stylus')) return 'inkjet';
+                      return 'laser';
+                    };
+                    // ── Detect ink_type from compatibility string ──
+                    const detectInkType = (compat: string, model: string): string => {
+                      const combined = (compat + ' ' + model).toLowerCase();
+                      if (combined.includes('inkjet') || combined.includes('t502') ||
+                          combined.includes('ecotank') || combined.includes('et-')) return 'inkjet';
+                      return 'laser';
+                    };
+
+                    for (const sheetName of wb2.SheetNames) {
+                      const ws2 = wb2.Sheets[sheetName];
+                      const rows: any[] = XLSX.utils.sheet_to_json(ws2, { defval: '' });
+                      const sn = sheetName.toLowerCase();
+
+                      for (const row of rows) {
+                        // Normalise: lowercase keys, collapse non-alphanum to _
+                        const n: Record<string,string> = {};
+                        Object.entries(row).forEach(([k,v]) => {
+                          n[k.toLowerCase().replace(/[\s/()]+/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'')] = String(v ?? '').trim();
+                        });
+
+                        if (sn.includes('computer') || sn.includes('pc') || sn.includes('laptop')) {
+                          const label = n['computer_name'] || n['label'] || n['name'] || '';
+                          if (!label) continue;
+                          devices.push({
+                            label,
+                            serial_number:  n['serial_number'] || n['s_n'] || n['sn'] || '',
+                            device_type:    n['device_kind'] || n['type'] || n['device_type'] || 'Laptop',
+                            model:          n['model'] || '',
+                            location:       n['location'] || '',
+                            department:     n['department'] || '',
+                            status:         n['status'] || '',
+                            comment:        n['comments'] || n['comment'] || '',
+                          });
+
+                        } else if (sn.includes('phone') || sn.includes('mobile')) {
+                          const label = n['name'] || n['label'] || '';
+                          if (!label) continue;
+                          devices.push({
+                            label,
+                            serial_number:  n['s_n'] || n['serial_number'] || n['sn'] || '',
+                            device_type:    'Phone',
+                            model:          n['model'] || '',
+                            imei:           n['imei'] || '',
+                            phone_number:   n['phone_number'] || '',
+                            comment:        n['comment'] || n['comments'] || '',
+                          });
+
+                        } else if (sn.includes('print')) {
+                          const label = n['printer_name'] || n['label'] || n['name'] || '';
+                          if (!label) continue;
+                          const model = n['model'] || '';
+                          const mfr   = n['manufacturer'] || '';
+                          devices.push({
+                            label,
+                            serial_number:  n['s_n'] || n['serial_number'] || n['sn'] || '',
+                            device_type:    'Printer',
+                            model,
+                            location:       n['location'] || '',
+                            department:     n['department'] || '',
+                            status:         n['status'] || '',
+                            printer_type:   detectPrinterType(model, mfr),
+                            duplex:         (n['duplex']||'').toLowerCase()==='yes' ? 1 : 0,
+                            color_support:  (n['color']||n['colour']||'').toLowerCase()==='yes' ? 1 : 0,
+                            comment:        n['comment'] || n['comments'] || '',
+                          });
+
+                        } else if (sn.includes('monitor')) {
+                          const label = n['monitor_name'] || n['label'] || n['name'] || '';
+                          if (!label) continue;
+                          devices.push({
+                            label,
+                            serial_number:  n['s_n'] || n['serial_number'] || n['sn'] || '',
+                            device_type:    'Monitor',
+                            model:          n['model'] || '',
+                            location:       n['location'] || '',
+                            department:     n['department'] || '',
+                            status:         n['status'] || '',
+                            comment:        n['comment'] || n['comments'] || '',
+                          });
+
+                        } else if (sn.includes('cart')) {
+                          const label = n['cartridge_name'] || n['label'] || n['name'] || '';
+                          if (!label) continue;
+                          const compat = n['compatible_printers'] || n['compatibility'] || n['reference'] || '';
+                          const model  = n['model'] || '';
+                          devices.push({
+                            label,
+                            serial_number:  n['reference'] || n['s_n'] || n['serial_number'] || '',
+                            device_type:    'Cartridge',
+                            model,
+                            printer_compatibility: compat,
+                            ink_type:       detectInkType(compat, model),
+                            department:     n['department'] || '',
+                            comment:        n['comment'] || n['comments'] || '',
+                          });
+
+                        } else if (sn.includes('disk') || sn.includes('drive') || sn.includes('disque')) {
+                          const label = n['disk_name'] || n['label'] || n['name'] || '';
+                          if (!label) continue;
+                          const rawCap = n['capacity_gb'] || n['capacity'] || '0';
+                          devices.push({
+                            label,
+                            serial_number:  n['s_n'] || n['serial_number'] || n['sn'] || '',
+                            device_type:    'Hard Drive',
+                            model:          n['model'] || '',
+                            drive_type:     n['type'] || 'HDD',
+                            capacity_gb:    parseInt(rawCap) || 0,
+                            status:         n['etat'] || n['état'] || n['status'] || '',
+                            comment:        n['comment'] || n['comments'] || '',
+                          });
+                        }
+                      }
+                    }
+
+                    if (!devices.length) { toast('No rows found — check sheet names match: Computers, Phones, Printers, Monitors, Cartridges, Disks', false); return; }
+
+                    const r2 = await api('POST', '/import', { devices });
+                    if (r2.ok || r2.status === 207) {
+                      const errs = r2.data.errors?.length ? ` · ${r2.data.errors.length} skipped/error` : '';
+                      toast(`${r2.data.message}${errs}`, r2.status !== 207);
+                    } else {
+                      toast(r2.data?.message || 'Import failed', false);
+                    }
+                  } catch(err: any) {
+                    toast('Could not read file: ' + (err?.message || String(err)), false);
+                  }
+                  e.target.value = '';
+                }}/>
+              </label>
+            </div>
 
       {/* Reference data tabs */}
       {activeRef && (

@@ -24,6 +24,8 @@ class DeviceController extends Controller
 
     public function index(Request $request)
     {
+        // SoftDeletes global scope automatically excludes deleted devices.
+        // Only active (non-deleted) devices are returned here.
         $query = Device::with([
             'deviceType','manufacturer','deviceModel.manufacturer',
             'location.site','department','user',
@@ -46,8 +48,10 @@ class DeviceController extends Controller
     public function store(Request $request)
     {
         $base = $request->validate([
-            'label'               => 'required|string|unique:devices,label',
-            'serial_number'       => 'required|string|unique:devices,serial_number',
+            // Unique rules use whereNull('deleted_at') so a soft-deleted device's
+            // label/serial doesn't block re-creation of a new device with the same name.
+            'label'               => 'required|string|unique:devices,label,NULL,id,deleted_at,NULL',
+            'serial_number'       => 'required|string|unique:devices,serial_number,NULL,id,deleted_at,NULL',
             'device_type_id'      => 'required|exists:device_types,id',
             'manufacturer_id'     => 'nullable|exists:manufacturers,id',
             'device_model_id'     => 'required|exists:device_models,id',
@@ -91,6 +95,7 @@ class DeviceController extends Controller
                 default      => null,
             };
 
+            // Log device creation — this entry is permanent and survives soft delete
             $this->logger->log($device->id, 'device_created', [
                 'label'       => $device->label,
                 'serial'      => $device->serial_number,
@@ -105,7 +110,9 @@ class DeviceController extends Controller
 
     public function show($id)
     {
-        return Device::with([
+        // withTrashed() allows viewing a soft-deleted device's full history if needed.
+        // Normally this won't be accessed for deleted devices, but it's safe to include.
+        return Device::withTrashed()->with([
             'deviceType','manufacturer','deviceModel.manufacturer',
             'location.site','department','user',
             'status','driveStatus','cartridgeStatus',
@@ -119,8 +126,10 @@ class DeviceController extends Controller
         $device = Device::findOrFail($id);
 
         $base = $request->validate([
-            'label'           => 'sometimes|string|unique:devices,label,'.$id,
-            'serial_number'   => 'nullable|string|unique:devices,serial_number,'.$id,
+            // Exclude current device ID from uniqueness check (standard update rule),
+            // AND also only check among non-deleted rows.
+            'label'           => 'sometimes|string|unique:devices,label,'.$id.',id,deleted_at,NULL',
+            'serial_number'   => 'nullable|string|unique:devices,serial_number,'.$id.',id,deleted_at,NULL',
             'manufacturer_id' => 'nullable|exists:manufacturers,id',
             'device_model_id' => 'nullable|exists:device_models,id',
             'location_id'     => 'nullable|exists:locations,id',
@@ -168,23 +177,43 @@ class DeviceController extends Controller
         });
     }
 
+    /**
+     * Soft-delete the device.
+     *
+     * IMPORTANT: this is a SOFT delete — the DB row is NOT removed.
+     * deleted_at is set to now(), which:
+     *   • Removes the device from all normal queries (index, assignments, etc.)
+     *   • Preserves every log entry (device_created, assigned, moved, status_changed…)
+     *     because the device_logs FK cascade only fires on hard DELETE, which never happens.
+     *   • Logs a final device_deleted entry so the audit trail is complete.
+     *
+     * The device's label, serial, and category are embedded in the log's details
+     * so the log is self-contained even if the device row is later purged manually.
+     */
     public function destroy($id)
     {
-        $device = Device::with(['deviceType'])->findOrFail($id);
+        return DB::transaction(function () use ($id) {
+            $device = Device::with(['deviceType'])->findOrFail($id);
 
-        // Log deletion before the record is removed
-        $this->logger->log($device->id, 'device_deleted', [
-            'label'       => $device->label,
-            'serial'      => $device->serial_number,
-            'category'    => $device->category,
-            'device_type' => $device->deviceType?->name,
-        ]);
+            // 1. Write the deletion log BEFORE soft-deleting so device_id is still valid.
+            $this->logger->log($device->id, 'device_deleted', [
+                'label'       => $device->label,
+                'serial'      => $device->serial_number,
+                'category'    => $device->category,
+                'device_type' => $device->deviceType?->name,
+                'deleted_at'  => now()->toISOString(),
+            ]);
 
-        $device->delete();
-        return response()->json(['message' => 'Device deleted.']);
+            // 2. Soft-delete: sets deleted_at, does NOT trigger the FK cascade on device_logs.
+            $device->delete();
+
+            return response()->json([
+                'message' => "Device [{$device->label}] has been decommissioned. All logs and history are preserved.",
+            ]);
+        });
     }
 
-    /* ── helpers ─────────────────────────────────────────────────── */
+    /* ── helpers ─────────────────────────────────────────────────────── */
 
     private function resolveStatusName(string $category, $id): string
     {
@@ -202,7 +231,6 @@ class DeviceController extends Controller
 
     private function findStockLocation(): ?Location
     {
-        // Search across ALL sites — first match wins
         return Location::where('name', 'Stock')->first();
     }
 
@@ -233,7 +261,7 @@ class DeviceController extends Controller
         };
         if (!$statusId) return;
         if (!$this->isStockStatus($this->resolveStatusName($category, $statusId))) return;
-        if (!empty($base['location_id'])) return; // respect explicit location choice
+        if (!empty($base['location_id'])) return;
 
         $stock = $this->findStockLocation();
         if ($stock) $base['location_id'] = $stock->id;
